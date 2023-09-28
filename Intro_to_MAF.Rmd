@@ -1,0 +1,125 @@
+---
+title: "Intro to MAF"
+author: Nicole Black, Wade Boohar
+date: 07/17/22
+updated: 09/17/23
+---
+
+***Deliverables***
+-Upload this R Notebook to your GitHub and submit the link to your Repo on BB.
+-Include any graphs or figures created in this assignment in the folder with your R notebook with descriptive file names.
+
+Since this is an optional partner activity, it is okay if your answers are the same as your partner’s as long as everyone understands it and could explain it in their own words if asked. Each person must individually push their code to Github. *At the top of your R Notebook, write the name of you and your partner(s) as a comment.*
+
+***Complete the following coding activity and answer any following questions as comments in your R Notebook***
+
+In MAF_Tutorial.Rmd, you looked at how to analyze mutation data in terms of clinical variables as well as mutation status. In this assignment, you will need to combine the two skills to demonstrate your understanding of categorical variables and R data structures.
+
+*Pre-Assignment*
+Load all necessary packages, read in the clinical data .csv file you have in your analysis_data folder, and instantiate the MAF_object.
+```{r}
+library(TCGAbiolinks)
+library(maftools)
+library(ggplot2)
+
+clinical <- read.csv("/Users/mi/Desktop/QBIO/qbio_490_jeanneR/analysis_data/brca_clinical_data.csv")
+
+colnames(clinical)[ colnames(clinical) == "bcr_patient_barcode" ] <- "Tumor_Sample_Barcode"
+
+write.csv(clinical, "/Users/mi/Desktop/QBIO/qbio_490_jeanneR/analysis_data/brca_clinical_data.csv", row.names = FALSE)
+
+maf_query <- GDCquery(
+    project = "TCGA-BRCA", 
+    data.category = "Simple Nucleotide Variation", 
+    access = "open", # we only have access to somatic mutations which are open access
+    data.type = "Masked Somatic Mutation", 
+    workflow.type = "Aliquot Ensemble Somatic Variant Merging and Masking"
+)
+
+#GDCdownload(maf_query)
+
+maf <- GDCprepare(maf_query) # as long as it runs, ignore any errors
+
+maf_object <- read.maf(maf = maf, 
+                       clinicalData = clinical,
+                       isTCGA = TRUE)
+```
+
+
+*1*
+Choose a clinical variable (or any variable from clin_rad or clin_drug) to separate your populations into two different groups and rewrite the column or create a new column with that variable as a factor. ***Do not use age or vital_status as your clinical variable.*** Hint: if your variable is continuous, you will need to determine your own cutoffs for the different levels of the factor. If your variable is categorical and has more than two possible values, choose the two that are the most common.
+```{r}
+# i will be using "her2_status_by_ihc" using values "positive" and "negative" 
+maf_object@clinical.data$her2_status_by_ihc <- factor(maf_object@clinical.data$her2_status_by_ihc, levels = c('Positive', 'Negative'))
+
+na_her2_mask <- ifelse(!is.na(maf_object@clinical.data$her2_status_by_ihc), T, F)
+maf_object@clinical.data <- maf_object@clinical.data[na_her2_mask,]
+```
+
+
+*2*
+Create a co-oncoplot with the top 10-20 (you choose) most mutated genes for the two groups. Pick one that has a large discrepancy in % mutated or type of mutations between the groups and research it. 
+Research it. What is the gene used for? Can you think of any reason for the discrepancy?
+```{r}
+positive_mask <- ifelse(maf_object@clinical.data$her2_status_by_ihc == 'Positive', T, F)
+positive_barcodes <- maf_object@clinical.data$Tumor_Sample_Barcode[positive_mask]
+positive_maf <- subsetMaf(maf = maf_object,
+                          tsb = positive_barcodes)
+
+negative_mask <- ifelse(maf_object@clinical.data$her2_status_by_ihc == 'Positive', F, T)
+negative_barcodes <- maf_object@clinical.data$Tumor_Sample_Barcode[negative_mask]
+negative_maf <- subsetMaf(maf = maf_object,
+                          tsb = negative_barcodes)
+
+coOncoplot(m1 = positive_maf, 
+           m2 = negative_maf, 
+           m1Name = 'Positive Patients', 
+           m2Name = 'Negative Patients', 
+           borderCol = NA)
+
+```
+According to my co-oncoplot, there is a higher rate of mutation in TP53 in her2 positive patients than in HER2 negative patients, 43% vs 34%. TP53 is a gene that codes for tumor protein 53, which is a tumor suppressor that prevents uncontrolled cell growth/division. HER2 status is characterized by an overexpression of HER2 proteins, which cause uncontrolled cell growth/division in breast cells. It makes sense that HER2 positive patients have a higher rate of mutation of TP53 than negative patients.
+
+*3*
+Create a contingency table with your variable and chosen gene. Run a Fisher’s Exact Test between presence of mutations for that gene and your clinical variable. Create and save a mosaic plot. 
+Interpret the output of the Fisher’s Exact Test in terms of the odds ratio and p-value.
+```{r}
+tp53_maf <- subsetMaf(maf = maf_object,
+                       genes = 'TP53')
+
+maf_object@clinical.data$tp53 <- ifelse(maf_object@clinical.data$Tumor_Sample_Barcode %in% tp53_maf@clinical.data$Tumor_Sample_Barcode, T, F)
+
+contig <- table(maf_object@clinical.data$her2_status_by_ihc, maf_object@clinical.data$tp53)
+mosaicplot(contig)
+
+fisher_test <- fisher.test(contig)
+
+fisher_test
+fisher_test$p.value
+```
+Since my p-value is 0.065 > 0.05, these results are not statistically significant. The odds ratio, 0.697, means there is a 0.697x chance of being her2 negative if you do not have the TP53 mutation. 
+
+*4*
+Subset your maf_object based on your chosen clinical variable and create a co-lollipop plot of your chosen gene divided between the two different clinical variable possibilities. Include descriptive names on your plot.
+Do you notice any difference in terms of mutations (e.g. sites, types, number) between the two populations?
+```{r}
+lollipopPlot2(m1 = positive_maf, 
+              m2 = negative_maf, 
+              m1_name = 'HER2 Positive',
+              m2_name = 'HER2 Negative',
+              gene = "TP53") 
+```
+There is a very common missense mutation in the HER2 negative group in the P53 gene that is not present in the positive group. In the last 3rd of the p53 gene, there is another missense mutation that is more common in the positive group than the negative group. Overall, missense mutations seem to be most common, and the sites of mutation seem to be relatively similar.
+
+*5*
+Create your Overall_Survival_Status column and create a mafSurvival KM plot based on mutations in your chosen gene.
+Does there seem to be a difference? Hypothesize why or not based on the other analysis you did with the gene above.
+```{r}
+maf_object@clinical.data$overall_survival_status <- ifelse(maf_object@clinical.data$vital_status == 'Alive', T, F)
+mafSurvival(maf = maf_object,
+            genes = "TP53",
+            time = "last_contact_days_to",
+            Status = "overall_survival_status", 
+            isTCGA = TRUE)
+```
+There does not seem to be a significant difference (and the p-value is greater than 0.05). This might be the case because there were no significant differences between TP53 mutations between HER2 positive and HER2 negative patients.
