@@ -18,11 +18,28 @@ In Transcriptomics_Tutorial.Rmd, you learned how to manipulate the SummarizedExp
 *Pre-Assignment*
 Use knitr function to set your working directory to your analysis_data folder in qbio_490_name.
 ```{r}
-
+knitr::opts_knit$set(root.dir = normalizePath("/Users/mi/Desktop/QBIO/qbio_490_jeanneR/analysis_data")) 
 ```
 
 Load all necessary packages and instantiate the rna_se object
 ```{r}
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+
+GDCdownload(rna_query)
+
+#rna_query <- GDCquery(project ="TCGA-BRCA",
+                      #data.category = "Transcriptome Profiling",
+                      #data.type = "Gene Expression Quantification",
+                      #workflow.type = "STAR - Counts")
+
+
+rna_se <- GDCprepare(rna_query)
+
+BiocManager::install("DESeq2")
+library(DESeq2)
+
+
 
 ```
 
@@ -30,13 +47,78 @@ Load all necessary packages and instantiate the rna_se object
 *1*
 Perform all data cleaning and label manipulation steps (hint: applying colnames and rownames to make the dataframes more readable) except for masking out the patient with an NA for age and the "Solid Tissue Normal" sample types.
 ```{r}
+rna_clinical <- rna_se@colData
+rna_clinical <- as.data.frame(rna_clinical)
+treatments_mask <- ifelse(colnames(rna_clinical) =='treatments', F, T)
+rna_clinical <- rna_clinical[, treatments_mask]
+
+primary_mask <- ifelse(colnames(rna_clinical) =='primary_site', F, T)
+rna_clinical <- rna_clinical[, primary_mask]
+
+disease_mask <- ifelse(colnames(rna_clinical) =='disease_type', F, T)
+rna_clinical <- rna_clinical[, disease_mask]
+
+rna_genes <- rna_se@rowRanges@elementMetadata
+rna_genes <- as.data.frame(rna_genes)
+
+rna_counts <- rna_se@assays@data$unstranded
+rna_counts <- as.data.frame(rna_counts)
+
+rna_clinical$age_category <- ifelse(rna_clinical$age_at_index <=58, 'young', 'old')
+
+rownames(rna_genes) <- rna_genes$gene_id
+
+rownames(rna_counts) <- rna_genes$gene_id
+colnames(rna_counts) <- rownames(rna_clinical)
+
 
 ```
 
 
 *2*
 Determine and define your experimental design for the differential expression analysis. Control for covariance of age, gender, OR vital_status. Manipulate those columns so that they are ready for differential expression analysis (hint: what kind of variables are they? what data type are they by default? do you need to handle unknown values?)
+
+1. Select categorical clinical variable you’re performing DE on
+I will pick vital status.
+
+2. Identify any covariate variable you want to control for in the experimental design
+My covariate will be age.
+
+3. Remove any NA values from column with boolean masking (Hint: is.na())
+
+4. Convert column data type into factor using factor()
+    (clinic$column_name <- factor(clinic$column_name))
+    
+5. Repeat for any covariates
+
+6. Pre-filtering → remove any genes from rna_counts where total sum across all patients is less than 10
+
+
 ```{r}
+#step 3 below:
+rna_clinical$vital_status
+NA_vital_mask <- !is.na(rna_clinical$vital_status)
+rna_clinical <- rna_clinical[NA_vital_mask,]
+
+#step 4 is below:
+rna_clinical$vital_status <- factor(rna_clinical$vital_status)
+
+#step 5 is below, cleaning the covariate of "age":
+rna_clinical$age_category #already made age a categorical variable in module 1
+NA_age_mask <- !is.na(rna_clinical$age_category)
+rna_clinical <- rna_clinical[NA_age_mask,]
+
+rna_clinical$age_category <- factor(rna_clinical$age_category)
+
+#matching up rna_counts to exclude NA patients:
+
+rna_counts <- rna_counts[, NA_vital_mask]
+rna_counts <- rna_counts[, NA_age_mask]
+
+#step 6 below
+less_10_mask <- rowSums(rna_counts) >= 10
+rna_counts <- rna_counts[less_10_mask,]
+rna_genes <- rna_genes[less_10_mask,]
 
 ```
 
@@ -44,14 +126,67 @@ Determine and define your experimental design for the differential expression an
 *3*
 Perform the differential expression analysis, create a volcano plot, and interpret what genes from each of the 6 sections means (assuming thresholds of -log10padj = 2 and log2FoldChange = 1)
 ```{r}
+dds <- DESeqDataSetFromMatrix(countData = rna_counts,
+                              colData = rna_clinical,
+                              design=~ age_category + vital_status)
+
+dds_obj <- DESeq(dds)
+
+resultsNames(dds_obj)
+
+results <- results(dds_obj, format = "DataFrame", contrast = c("vital_status", "Alive", "Dead"))
+
+
+results <- data.frame(results)
+
+results$gene_name <- rna_genes$gene_name
+results$"-log10(padj)" <- -log10(results$padj)
+
+colnames(results) <- c("baseMean", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj", "gene_name", "-log10(-adj)") ## FIX column names
+
+row.names(results) <- rna_genes$gene_id
+
+sig_results_mask <- ifelse(results$padj < 0.05, T, F)
+sig_results <- results[sig_results_mask,]
+insig_results <- results[!sig_results_mask,]
+
+order_foldchange <- order(sig_results$log2FoldChange, decreasing = TRUE)
+up_reg_results <- sig_results[order_foldchange, ]
+greater_than_one_mask <- ifelse(up_reg_results$log2FoldChange>1, T, F)
+up_reg_results <- up_reg_results[greater_than_one_mask, ]
+
+down_reg_results <- sig_results[order(sig_results$log2FoldChange, decreasing = FALSE), ]
+down_reg_results <- down_reg_results[ifelse(down_reg_results$log2FoldChange<-1, T, F),]
+
+
+
+par(mar=c(0,1,1,1))
+EnhancedVolcano(results,
+                lab = results$gene_name,
+                x = 'log2FoldChange',
+                y = 'pvalue',
+                title = 'Vital Status: Alive vs Dead',
+                pointSize = 1.0,
+                labSize = 5.0)
+
+BR_FC_mask <- ifelse(results$log2FoldChange>1, T, F)
+bottom_right_genes <- results[BR_FC_mask,]
+BR_padj_mask <- ifelse(bottom_right_genes$padj>0.05, T, F)
+bottom_right_genes <- bottom_right_genes[BR_padj_mask,]
+
+BL_FC_mask <- ifelse(-1 > results$log2FoldChange, T, F)
+bottom_left_genes <- results[BL_FC_mask,]
+BL_padj_mask <- ifelse(bottom_right_genes$padj>0.05, T, F)
+bottom_left_genes <- bottom_left_genes[BR_padj_mask,]
+
 
 ```
 
-top-right genes: 
-bottom-right genes: 
-top-left genes: 
-bottom-left genes: 
-top-middle genes:
-bottom-middle genes:
+top-right genes: SNORA73B, SNORA74A, UPK1B, SFTPB, CST4, ADH7, DLX6
+bottom-right genes: RN7SKP227, RNU1-89P, RN7SL442P, MIR938
+top-left genes: ABCB5, CSN2, APOH, SLC7A14, ABCB5
+bottom-left genes: LCE1A, AF241725.1, AL137001.2, LINC01202
+top-middle genes: GPR50, LINC01322, AC244035.1, LINC02242
+bottom-middle genes: VN1R2, OST4, USP32, DCAF15
 
 Save the picture of the volcano plot (using either ggsave() or right clicking and manually downloading the image and push this .Rmd and the image to GitHub)
